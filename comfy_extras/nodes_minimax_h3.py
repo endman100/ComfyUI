@@ -46,6 +46,50 @@ def temporal_shape(length):
     return frame_count, video_latent_t(frame_count), round(duration * AUDIO_LATENT_FPS)
 
 
+class MiniMaxH3TemporalRampMask(io.ComfyNode):
+    """Create a full-frame denoise mask for overlapped video continuation."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3TemporalRampMask",
+            display_name="MiniMax H3 Temporal Ramp Mask",
+            category="mask/minimax",
+            description=(
+                "Full-frame continuation mask generated in memory. Frame 0 is protected "
+                "(0); the mask rises linearly to full denoise (1) over protect_seconds, "
+                "then remains at 1. No mask video is required."
+            ),
+            inputs=[
+                io.Int.Input("width", default=896, min=1, max=nodes.MAX_RESOLUTION, step=1),
+                io.Int.Input("height", default=672, min=1, max=nodes.MAX_RESOLUTION, step=1),
+                io.Int.Input("length", default=124, min=2, max=3600, step=1),
+                io.Float.Input("fps", default=24.0, min=0.01, max=240.0, step=0.01),
+                io.Float.Input(
+                    "protect_seconds",
+                    default=1.0,
+                    min=0.0,
+                    max=60.0,
+                    step=0.01,
+                    tooltip="Seconds used for the 0-to-1 transition. Frame 0 always stays exactly 0.",
+                ),
+            ],
+            outputs=[
+                io.Mask.Output(),
+                io.Int.Output(display_name="protected_frames"),
+                io.Int.Output(display_name="new_frames"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, width, height, length, fps, protect_seconds) -> io.NodeOutput:
+        protected_frames = max(1, min(length - 1, int(protect_seconds * fps + 0.5)))
+        frame_indices = torch.arange(length, dtype=torch.float32)
+        weights = (frame_indices / protected_frames).clamp_(0.0, 1.0)
+        mask = weights[:, None, None].expand(-1, height, width)
+        return io.NodeOutput(mask, protected_frames, length - protected_frames)
+
+
 def adapt_canvas(width, height):
     """768-short-edge canvas with 768*1344 area cap, per-axis round to 32."""
     ratio = width / height
@@ -326,6 +370,7 @@ class MiniMaxH3SigmaShift(io.ComfyNode):
 class MiniMaxH3Extension(ComfyExtension):
     async def get_node_list(self):
         return [
+            MiniMaxH3TemporalRampMask,
             EmptyMiniMaxH3LatentAV,
             MiniMaxH3ImageToVideo,
             MiniMaxH3ReferenceToVideo,
